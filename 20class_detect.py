@@ -17,12 +17,12 @@ LED_ACTIVE_LOW = True  # LED 是否为低电平点亮
 MODEL_ADDR = 0x800000
 CLASSES = ['aeroplane', 'bicycle', 'bird', 'boat', 'bottle', 'bus', 'car', 'cat', 'chair', 'cow', 'diningtable', 'dog', 'horse', 'motorbike', 'person', 'pottedplant', 'sheep', 'sofa', 'train', 'tvmonitor']
 ANCHOR = (1.08, 1.19, 3.42, 4.41, 6.63, 11.38, 9.42, 5.11, 16.62, 10.52)
-CONF_THRESHOLD = 0.5
+CONF_THRESHOLD = 0.3
 NMS_THRESHOLD = 0.3
 
 # 追踪算法参数
-TARGET_CLASSID = 14          # 追踪目标类别 ID, 'person' (None 追踪所有)
-IOU_THRESH = 0.3             # IOU 匹配阈值
+TARGET_CLASSID = 14          # 追踪目标类别 ID, 'person' (None a追踪所有)
+IOU_THRESH = 0.0             # IOU 匹配阈值 (降低阈值，更宽容地匹配旧目标，防止多框)
 MAX_MISSED_FRAMES = 5        # 最大丢失帧数
 AREA_EMA_ALPHA = 0.7         # 面积平滑系数
 V_EMA_ALPHA = 0.8            # 速度平滑系数
@@ -32,9 +32,9 @@ APPROACH_CONFIRM_FRAMES = 2  # 连续判断为“靠近”的帧数
 
 # 闪烁逻辑参数
 # 根据您的要求修改：最快500ms，最慢3秒
-LED_PERIOD_MIN_MS = 500      # (要求) 最快闪烁周期 (ms)
-LED_PERIOD_MAX_MS = 3000     # (要求) 最慢闪烁周期 (ms)
-LED_PULSE_MS = 50            # LED每次点亮的脉冲宽度 (ms)
+LED_PERIOD_MIN_MS = 1500     # (要求) 最快闪烁周期 (ms) (至少要比脉冲宽度大，保证有灭的时间)
+LED_PERIOD_MAX_MS = 4000     # (要求) 最慢闪烁周期 (ms)
+LED_PULSE_MS = 1000          # LED每次点亮的脉冲宽度 (ms) (设置为1秒)
 AREA_NEAR = 20000            # "近"的参考面积
 AREA_FAR = 1500              # "远"的参考面积
 
