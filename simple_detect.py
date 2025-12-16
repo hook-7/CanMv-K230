@@ -8,7 +8,7 @@ from Maix import GPIO
 from board import board_info
 from fpioa_manager import fm
 
-# --- 全局配置常量 ---
+# --- 1. 全局配置常量 ---
 
 # LED/GPIO 设置
 IO_LED_RED = 13
@@ -23,17 +23,20 @@ NMS_THRESHOLD = 0.3    # NMS 阈值
 
 TARGET_CLASSID = 14    # 'person'
 
-# 新的闪烁逻辑参数
-GLOBAL_PERIOD_MS = 2000    # 大周期 2秒
+# 闪烁逻辑参数 (双周期控制)
+GLOBAL_PERIOD_MS = 2000    # 大周期 2秒 (2000ms)
 SUB_PERIOD_MS = 200        # 小周期 200ms (100亮+100灭)
 SUB_ON_MS = 100            # 小周期中亮的时长
 
 # 面积阈值 (基于 QVGA 320x240 = 76800 像素)
 TOTAL_PIXELS = 320 * 240
-AREA_THRESH_80 = int(TOTAL_PIXELS * 0.80)  # ~61440
-AREA_THRESH_13 = int(TOTAL_PIXELS * 0.13)  # ~9984
+AREA_THRESH_80 = int(TOTAL_PIXELS * 0.70)  # ~53760 (极近 70%)
+AREA_THRESH_13 = int(TOTAL_PIXELS * 0.13)  # ~9984  (中等起步)
 
-# --- 初始化 ---
+# 防抖参数
+CONFIRM_FRAMES = 2         # 连续确认帧数
+
+# --- 2. 硬件初始化 ---
 
 # LED 初始化
 fm.register(IO_LED_RED, fm.fpioa.GPIO0)
@@ -60,47 +63,47 @@ clock = time.clock()
 task = kpu.load(MODEL_ADDR)
 _ = kpu.init_yolo2(task, CONF_THRESHOLD, NMS_THRESHOLD, 5, ANCHOR)
 
-# --- 定时器与LED控制逻辑 (中断驱动) ---
+# --- 3. 定时器中断 (LED 控制核心) ---
 
-# 全局变量，用于主循环和中断之间通信
+# 全局变量：主循环与中断通信
 g_target_blink_count = 0     # 主循环写入：期望的闪烁次数
 g_locked_blink_count = 0     # 中断内部使用：当前周期锁定的次数
 g_timer_start_ms = 0         # 中断内部使用：当前周期开始时间
 
 def on_timer_blink(timer):
     """
-    定时器回调函数：每 20ms 被触发一次
-    负责精准控制 LED，不受主循环 FPS 影响
+    定时器回调：每 20ms 执行一次
+    功能：实现双周期锁定与精准 LED 控制
     """
     global g_target_blink_count, g_locked_blink_count, g_timer_start_ms, LED_ON, LED_OFF
     
     current_time = utime.ticks_ms()
     
-    # 初始化
+    # 首次运行初始化
     if g_timer_start_ms == 0:
         g_timer_start_ms = current_time
         
     elapsed = utime.ticks_diff(current_time, g_timer_start_ms)
     
-    # 1. 周期锁定逻辑：检查大周期是否结束
+    # [逻辑 A] 周期锁定：检查大周期是否结束
     if elapsed >= GLOBAL_PERIOD_MS:
         g_timer_start_ms = current_time
         elapsed = 0
-        # 只有在周期开始时，才更新锁定的次数
+        # 仅在周期开始瞬间，采纳新的目标次数 (实现 Period Locking)
         g_locked_blink_count = g_target_blink_count
         
-    # 2. 执行闪烁逻辑
+    # [逻辑 B] 执行闪烁
     active_duration = g_locked_blink_count * SUB_PERIOD_MS
     
     if elapsed < active_duration:
-        # 处于活动期
+        # 处于活动期 (Active Phase)
         sub_phase = elapsed % SUB_PERIOD_MS
         if sub_phase < SUB_ON_MS:
             led_b.value(LED_ON)
         else:
             led_b.value(LED_OFF)
     else:
-        # 处于休眠期
+        # 处于休眠期 (Rest Phase)
         led_b.value(LED_OFF)
 
 # 启动定时器: TIMER0, CHANNEL0, 周期 20ms (50Hz)
@@ -111,75 +114,96 @@ tim = Timer(Timer.TIMER0, Timer.CHANNEL0, mode=Timer.MODE_PERIODIC, period=20, c
 def _clamp(v, vmin, vmax):
     return max(vmin, min(v, vmax))
 
+def draw_ref_rect(img, area, color):
+    """
+    根据面积自动画出一个 4:3 比例的参考框，并居中显示
+    """
+    # 屏幕比例 4:3 => W = 4/3 * H
+    # Area = W * H = 4/3 * H^2
+    # H^2 = Area * 3/4
+    h = int(math.sqrt(area * 3 / 4))
+    w = int(h * 4 / 3)
+    
+    # 屏幕中心 (160, 120)
+    x = 160 - w // 2
+    y = 120 - h // 2
+    
+    img.draw_rectangle(x, y, w, h, color=color)
+
 # --- 主循环 ---
 
 # 防抖状态变量
-CONFIRM_FRAMES = 2
 last_suggested_count = -1
 confirm_counter = 0
 
-while(True):
-    clock.tick()
-    img = sensor.snapshot()
-    code = kpu.run_yolo2(task, img)
-
-    best_det = None
-    max_area = 0
-
-    if code:
-        for det in code:
-            # 只处理目标类别 (人)
-            if det.classid() == TARGET_CLASSID:
-                # 绘制检测框
-                _ = img.draw_rectangle(det.rect(), color=(0, 255, 0))
-                # 修正：使用 img.draw_string 而不是 lcd.draw_string
-                _ = img.draw_string(det.x(), det.y(), CLASSES[det.classid()], color=(255, 0, 0), scale=2)
-
-                area = det.w() * det.h()
-                if area > max_area:
-                    max_area = area
-                    best_det = det
-
-    # --- 决定本帧建议的闪烁次数 ---
-    suggested_blink_count = 0 
-    
-    if best_det:
-        if max_area >= AREA_THRESH_80:
-            suggested_blink_count = 5
-        elif max_area >= (TOTAL_PIXELS * 0.40):
-            suggested_blink_count = 2
-        elif max_area >= AREA_THRESH_13:
-            suggested_blink_count = 1
-        else:
-            suggested_blink_count = 0
-            
-    # --- 防抖逻辑 (Hysteresis) ---
-    if suggested_blink_count == last_suggested_count:
-        confirm_counter += 1
-    else:
-        confirm_counter = 0
-        last_suggested_count = suggested_blink_count
+try:
+    while(True):
+        clock.tick()
         
-    if confirm_counter >= CONFIRM_FRAMES:
-        # 【关键】更新全局变量，通知定时器中断
-        g_target_blink_count = suggested_blink_count
-        # 为了防止溢出
-        confirm_counter = CONFIRM_FRAMES 
+        # 图像采集与 AI 推理
+        img = sensor.snapshot()
+        code = kpu.run_yolo2(task, img)
 
-    # --- 绘制辅助参考框 ---
-    img.draw_rectangle(160-50, 120-50, 100, 100, color=(0, 0, 255))
-    img.draw_rectangle(160-87, 120-87, 175, 175, color=(255, 255, 0))
-    img.draw_rectangle(160-124, 120-124, 248, 248, color=(255, 0, 0))
+        best_det = None
+        max_area = 0
 
-    # --- 显示与输出 ---
-    _ = lcd.display(img)
+        # --- A. 处理检测结果 ---
+        if code:
+            for det in code:
+                # 仅关注目标类别 (Person)
+                if det.classid() == TARGET_CLASSID:
+                    # 绘制检测框 (绿色) 与 标签 (红色)
+                    img.draw_rectangle(det.rect(), color=(0, 255, 0))
+                    img.draw_string(det.x(), det.y(), CLASSES[det.classid()], color=(255, 0, 0), scale=2)
 
-    # --- LED 控制已移交中断，主循环无需调用 ---
-    
-    gc.collect()
+                    # 寻找最大目标
+                    area = det.w() * det.h()
+                    if area > max_area:
+                        max_area = area
+                        best_det = det
 
-# --- 清理 ---
-tim.stop() # 停止定时器
-_ = kpu.deinit(task)
-fm.unregister(IO_LED_RED)
-print("Application stopped.")
+        # --- B. 决策逻辑 (状态机) ---
+        suggested_blink_count = 0 
+        
+        if best_det:
+            if max_area >= AREA_THRESH_80:
+                suggested_blink_count = 5  # 极近: 闪5次
+            elif max_area > AREA_THRESH_13:
+                suggested_blink_count = 2  # 中等 (13%~80%): 闪2次
+            else:
+                suggested_blink_count = 1  # 较远 (<=13%): 闪1次
+        else:
+            suggested_blink_count = 0      # 未检测到: 灭
+                
+        # --- C. 防抖逻辑 (Hysteresis) ---
+        if suggested_blink_count == last_suggested_count:
+            confirm_counter += 1
+        else:
+            confirm_counter = 0
+            last_suggested_count = suggested_blink_count
+            
+        if confirm_counter >= CONFIRM_FRAMES:
+            # 只有连续 N 帧一致，才更新给定时器
+            g_target_blink_count = suggested_blink_count
+            confirm_counter = CONFIRM_FRAMES # 防止溢出
+
+        # --- 绘制辅助参考框 (自动计算 4:3 比例) ---
+        # 1. 13% 参考框 (蓝色)
+        draw_ref_rect(img, AREA_THRESH_13, color=(0, 0, 255))
+        
+        # 2. 70% 参考框 (红色)
+        draw_ref_rect(img, AREA_THRESH_80, color=(255, 0, 0))
+
+        # --- E. 显示与垃圾回收 ---
+        lcd.display(img)
+        # print("FPS: %.2f" % clock.fps())
+        gc.collect()
+
+except Exception as e:
+    print("Error:", e)
+finally:
+    # --- 5. 清理资源 ---
+    tim.stop()
+    kpu.deinit(task)
+    fm.unregister(IO_LED_RED)
+    print("Application stopped.")
