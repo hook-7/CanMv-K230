@@ -22,23 +22,9 @@ import gc
 import sys
 import aidemo
 import math
-from machine import Pin, Timer # 导入硬件控制模块
+from machine import Pin, Timer 
 
 # --- 1. 全局配置与状态变量 ---
-
-# LED 初始化
-LED = Pin(52, Pin.OUT)
-LED_ON = 1 # 假设高电平亮
-LED_OFF = 0
-
-# --- 上电自检: 快速闪烁3次 ---
-print("LED Self-Check...")
-for _ in range(3):
-    LED.value(LED_ON)
-    time.sleep_ms(200)
-    LED.value(LED_OFF)
-    time.sleep_ms(200)
-print("LED Check Done.")
 
 # 闪烁逻辑参数 (双周期)
 GLOBAL_PERIOD_MS = 2000    # 大周期 2秒
@@ -49,47 +35,6 @@ SUB_ON_MS = 100            # 亮 100ms
 g_target_blink_count = 0     # 目标闪烁次数
 g_locked_blink_count = 0     # 锁定次数
 g_timer_start_ms = 0         # 周期开始时间
-
-# 定时器回调 (LED 控制核心)
-def on_timer_blink(t=None):
-    global g_target_blink_count, g_locked_blink_count, g_timer_start_ms, LED_ON, LED_OFF
-
-    current_time = time.ticks_ms()
-
-    if g_timer_start_ms == 0:
-        g_timer_start_ms = current_time
-
-    elapsed = time.ticks_diff(current_time, g_timer_start_ms)
-
-    # 周期锁定
-    if elapsed >= GLOBAL_PERIOD_MS:
-        g_timer_start_ms = current_time
-        elapsed = 0
-        g_locked_blink_count = g_target_blink_count
-
-    # 执行闪烁
-    active_duration = g_locked_blink_count * SUB_PERIOD_MS
-
-    if elapsed < active_duration:
-        sub_phase = elapsed % SUB_PERIOD_MS
-        if sub_phase < SUB_ON_MS:
-            LED.value(LED_ON)
-        else:
-            LED.value(LED_OFF)
-    else:
-        LED.value(LED_OFF)
-
-# --- 初始化定时器 (使用软件定时器 ID=-1) ---
-# 文档: https://wiki.01studio.cc/docs/canmv_k230/basic_examples/timer
-# "目前只支持软件定时器，其 id 值为 -1"
-try:
-    tim = Timer(-1)
-    tim.init(period=20, mode=Timer.PERIODIC, callback=on_timer_blink)
-    print("Soft Timer initialized successfully.")
-except Exception as e:
-    print(f"Timer init failed: {e}")
-    tim = None
-
 
 # 自定义YOLOv8检测类
 class ObjectDetectionApp(AIBase):
@@ -111,7 +56,7 @@ class ObjectDetectionApp(AIBase):
 
         # 面积阈值计算 (基于显示分辨率)
         self.total_pixels = self.display_size[0] * self.display_size[1]
-        self.area_thresh_80 = int(self.total_pixels * 0.70) # 复刻 simple_detect (70%)
+        self.area_thresh_80 = int(self.total_pixels * 0.70) 
         self.area_thresh_13 = int(self.total_pixels * 0.13)
 
     def config_preprocess(self,input_image_size=None):
@@ -165,7 +110,6 @@ class ObjectDetectionApp(AIBase):
             pl.osd_img.clear()
 
             # 1. 绘制辅助参考框 (居中, 4:3 比例)
-            # 屏幕中心
             cx, cy = self.display_size[0] // 2, self.display_size[1] // 2
 
             # 蓝色 (13%)
@@ -175,8 +119,6 @@ class ObjectDetectionApp(AIBase):
 
             if dets is not None:
                 for det in dets:
-                    # 过滤: 只处理 person (class_id=0, 根据 COCO 80类，person通常是0)
-                    # 注意: k230代码里 labels[0] 是 "person"
                     class_id = int(det[5])
                     if class_id == 0:
                         x1, y1, x2, y2 = map(lambda x: int(round(x, 0)), det[:4])
@@ -185,9 +127,10 @@ class ObjectDetectionApp(AIBase):
                         w = (x2 - x1) * self.display_size[0] // self.rgb888p_size[0]
                         h = (y2 - y1) * self.display_size[1] // self.rgb888p_size[1]
 
-                        # 绘制绿色检测框 (RGBA: 255, 0, 255, 0)
+                        # 绘制绿色检测框
                         pl.osd_img.draw_rectangle(x,y, w, h, color=(255, 0, 255, 0), thickness=4)
-                        pl.osd_img.draw_string_advanced(x, y-50, 32, " " + self.labels[class_id], color=(255, 0, 255, 0))
+                        # 显示标签和置信度
+                        pl.osd_img.draw_string_advanced(x, y-50, 32, " " + self.labels[class_id] + " " + str(round(det[4],2)), color=(255, 0, 255, 0))
 
                         # 计算面积
                         area = w * h
@@ -197,7 +140,6 @@ class ObjectDetectionApp(AIBase):
         return max_person_area
 
     def _draw_ref_box(self, pl, area, color, cx, cy):
-        # 计算 4:3 宽高
         h = int(math.sqrt(area * 3 / 4))
         w = int(h * 4 / 3)
         x = cx - w // 2
@@ -242,11 +184,11 @@ class ObjectDetectionApp(AIBase):
 
 if __name__=="__main__":
 
-    display="lcd3_5"
+    display="hdmi" # 默认改为 hdmi 进行测试
 
     if display=="hdmi":
         display_mode='hdmi'
-        display_size=[1920,1080]
+        display_size=[1280,720] # Sensor最大支持1280，改为720P输出以匹配Sensor
     elif display=="lcd3_5":
         display_mode= 'st7701'
         display_size=[800,480]
@@ -258,24 +200,25 @@ if __name__=="__main__":
     kmodel_path="/sdcard/examples/kmodel/yolov8n_320.kmodel"
     labels = ["person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch", "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush"]
 
-    confidence_threshold = 0.2
+    confidence_threshold = 0.5   
     nms_threshold = 0.2
-    max_boxes_num = 50
+    max_boxes_num = 20           
 
-    # PipeLine内部已经处理了显示，不需要手动调用Display.init()
-    # 如果调用Display.init()会导致与PipeLine的显示输出冲突，造成闪烁
     pl=PipeLine(rgb888p_size=rgb888p_size,display_size=display_size,display_mode=display_mode)
+
+    # 实例化 Sensor 对象
     if display =="lcd2_4":
-        pl.create(Sensor(width=1280, height=960))  # 2.4寸屏，4:3比例，传感器1280x960
+        s = Sensor(width=640, height=480)
     elif display =="lcd3_5":
-        pl.create(Sensor(width=1280, height=960))  # 3.5寸屏，传感器1280x960（足够800x480显示，性能更好）
+        s = Sensor(width=1280, height=720) 
     else:  # hdmi
-        pl.create(Sensor(width=1920, height=1080))  # HDMI显示，传感器1920x1080（匹配1080p输出）
-    
-    # 等待传感器和显示系统完全初始化
-    # 传感器需要一些时间来启动，否则可能出现snapshot失败的错误
+        s = Sensor(width=1280, height=720) # 降级 Sensor 到 720P 以节省内存并提高稳定性，显示端仍输出 1080P
+
+    pl.create(s)
+
     print("Waiting for sensor initialization...")
-    time.sleep_ms(1000)  # 增加等待时间到1秒
+    time.sleep_ms(1000) 
+
     print(f"PipeLine initialized: display_mode={display_mode}, display_size={display_size}")
 
     ob_det=ObjectDetectionApp(kmodel_path,labels=labels,model_input_size=[320,320],max_boxes_num=max_boxes_num,confidence_threshold=confidence_threshold,nms_threshold=nms_threshold,rgb888p_size=rgb888p_size,display_size=display_size,debug_mode=0)
@@ -288,41 +231,68 @@ if __name__=="__main__":
     last_suggested = -1
     confirm_count = 0
     frame_count = 0
-    
-    # 帧率控制：限制最大FPS，避免IDE显示闪烁
-    target_fps = 30  # 目标帧率
-    frame_time_ms = 1000 // target_fps  # 每帧时间（毫秒）
-    last_frame_time = time.ticks_ms()
+
+    # --- 虚拟 LED 状态变量 ---
+    v_timer_start_ms = 0
+    v_locked_blink_count = 0
+    v_led_on = False
 
     try:
         while True:
-            clock.tick()
             frame_count += 1
-            
-            # 帧率控制：如果帧率太高，添加延迟
-            current_time = time.ticks_ms()
-            elapsed = time.ticks_diff(current_time, last_frame_time)
-            if elapsed < frame_time_ms:
-                time.sleep_ms(frame_time_ms - elapsed)
-            last_frame_time = time.ticks_ms()
 
-            # 获取帧数据，添加错误处理
+            # --- 虚拟 LED 闪烁逻辑更新 ---
+            current_time = time.ticks_ms()
+            if v_timer_start_ms == 0:
+                v_timer_start_ms = current_time
+
+            elapsed = time.ticks_diff(current_time, v_timer_start_ms)
+            if elapsed >= GLOBAL_PERIOD_MS:
+                v_timer_start_ms = current_time
+                elapsed = 0
+                v_locked_blink_count = g_target_blink_count 
+
+            active_duration = v_locked_blink_count * SUB_PERIOD_MS
+            if elapsed < active_duration:
+                sub_phase = elapsed % SUB_PERIOD_MS
+                v_led_on = (sub_phase < SUB_ON_MS)
+            else:
+                v_led_on = False
+
+            # 获取帧数据
             try:
                 img=pl.get_frame()
             except Exception as e:
                 print(f"Failed to get frame: {e}")
-                time.sleep_ms(100)  # 等待后重试
+                time.sleep_ms(100)  
                 continue
-            
-            res=ob_det.run(img)
 
-            # 绘制并获取最大 person 面积
+            res=ob_det.run(img)
             max_area = ob_det.draw_result(pl, res)
+
+            # --- 绘制虚拟 LED ---
+            led_x = display_size[0] - 40
+            led_y = 40
+
+            led_color = (255, 128, 128, 128) # 默认灰色 (灭)
+            if v_led_on:
+                if v_locked_blink_count >= 5:
+                    led_color = (255, 255, 0, 0) # 红 (极近)
+                elif v_locked_blink_count >= 2:
+                    led_color = (255, 255, 255, 0) # 黄 (中等)
+                elif v_locked_blink_count >= 1:
+                    led_color = (255, 0, 255, 0) # 绿 (远)
+
+            # 绘制虚拟 LED (外框 + 填充感矩形)
+            pl.osd_img.draw_rectangle(led_x - 25, led_y - 25, 50, 50, color=(255, 255, 255, 255), thickness=2)
+            if v_led_on:
+                pl.osd_img.draw_rectangle(led_x - 20, led_y - 20, 40, 40, color=led_color, thickness=20)
+                pl.osd_img.draw_string_advanced(led_x - 10, led_y - 20, 40, "O", color=(255, 255, 255, 255))
+            else:
+                pl.osd_img.draw_rectangle(led_x - 5, led_y - 5, 10, 10, color=(255, 50, 50, 50), thickness=5)
 
             # --- 决策逻辑 ---
             suggested = 0
-            # 判定有没有检测到人 (res 非空且有 max_area)
-            # 注意: res 可能包含了非person物体，但 max_area 只统计 person
             if max_area > 0:
                 if max_area >= ob_det.area_thresh_80:
                     suggested = 5 # 极近
@@ -345,19 +315,15 @@ if __name__=="__main__":
                 confirm_count = CONFIRM_FRAMES
 
             pl.show_image()
-            gc.collect()
 
-            # --- 调试打印 (每30帧打印一次) ---
+            if frame_count % 60 == 0:
+                gc.collect()
+
             if frame_count % 30 == 0:
-                print(f"FPS: {clock.fps():.1f}, Area: {max_area}, Blink: {g_target_blink_count}")
+                print(f"Frame: {frame_count}, Area: {max_area}, Blink: {g_target_blink_count}")
 
     except Exception as e:
         sys.print_exception(e)
     finally:
         pl.destroy()
-        if tim:
-            try:
-                tim.deinit()
-            except:
-                pass
         print("Stopped")
