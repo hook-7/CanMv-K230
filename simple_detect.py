@@ -30,7 +30,7 @@ SUB_ON_MS = 100            # 小周期中亮的时长
 
 # 面积阈值 (基于 QVGA 320x240 = 76800 像素)
 TOTAL_PIXELS = 320 * 240
-AREA_THRESH_80 = int(TOTAL_PIXELS * 0.70)  # ~53760 (极近 70%)
+AREA_THRESH_80 = int(TOTAL_PIXELS * 0.60)  # ~53760 (极近 70%)
 AREA_THRESH_13 = int(TOTAL_PIXELS * 0.13)  # ~9984  (中等起步)
 
 # 防抖参数

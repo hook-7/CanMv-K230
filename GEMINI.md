@@ -63,3 +63,7 @@ The `20class_detect.py` script is intended for a Maix development board. It cann
 *   **Scripts:** The original scripts (`20class_detect.py`, `20class_detect_o.py`) appear to be experimental versions for the embedded platform. The more stable and general-purpose script for desktop use is `object_detection.py`.
 
 始终使用中文回答用户问题
+
+## 参考代码
+
+1. "02-Codes/CanMV K230" 中都是示例代码, 编写代码前请先参考
