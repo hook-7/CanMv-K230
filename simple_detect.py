@@ -35,7 +35,7 @@ AREA_THRESH_80 = int(TOTAL_PIXELS * 0.20)
 AREA_THRESH_13 = int(TOTAL_PIXELS * 0.02)
 
 # 防抖参数
-CONFIRM_FRAMES = 2         # 连续确认帧数
+CONFIRM_FRAMES = 1         # 连续确认帧数
 
 # --- 2. 硬件初始化 ---
 
@@ -88,11 +88,29 @@ def update_led_blink(blink_count):
     """
     global g_period_start_time, g_blink_duration, g_cooldown_duration
     
+    # 如果 blink_count = 0，不设置新的冷却期
+    # 这样可以立即响应新的检测结果，不会因为"未检测到"而等待冷却期
+    if blink_count == 0:
+        # 如果当前没有在闪烁，可以立即重置状态
+        if g_period_start_time != 0:
+            current_time = time.ticks_ms()
+            elapsed = time.ticks_diff(current_time, g_period_start_time)
+            # 只有在冷却期结束后才重置，避免打断正在进行的闪烁
+            if elapsed >= g_cooldown_duration:
+                g_period_start_time = 0
+                g_blink_duration = 0
+                g_cooldown_duration = 0
+                print("[LED] 周期结束，重置状态")
+        return
+    
     current_time = time.ticks_ms()
     
     # 计算当前周期是否已经结束
     # 如果从未开始过 (0) 或者 (当前时间 - 开始时间) 已经超过了 冷却时长
-    elapsed = time.ticks_diff(current_time, g_period_start_time)
+    if g_period_start_time == 0:
+        elapsed = 0
+    else:
+        elapsed = time.ticks_diff(current_time, g_period_start_time)
     
     if g_period_start_time == 0 or elapsed >= g_cooldown_duration:
         # 可以开始新周期
@@ -106,9 +124,8 @@ def update_led_blink(blink_count):
         g_blink_duration = blink_duration
         g_cooldown_duration = cooldown_duration
         
-        if blink_count > 0:
-            print("[LED] 新周期: 闪{}次 ({}ms), 冷却直到 +{}ms".format(
-                blink_count, blink_duration, cooldown_duration))
+        print("[LED] 新周期: 闪{}次 ({}ms), 冷却直到 +{}ms".format(
+            blink_count, blink_duration, cooldown_duration))
 
 def on_timer_time(timer, arg=None):
     """
