@@ -33,6 +33,7 @@ SUB_ON_MS = 100            # 小周期中亮的时长
 TOTAL_PIXELS = 320 * 240
 AREA_THRESH_80 = int(TOTAL_PIXELS * 0.20)
 AREA_THRESH_13 = int(TOTAL_PIXELS * 0.02)
+AREA_THRESH_MIN = int(TOTAL_PIXELS * 0.005)  # 最小阈值 0.5%，低于此值不闪烁
 
 # 防抖参数
 CONFIRM_FRAMES = 1         # 连续确认帧数
@@ -65,8 +66,10 @@ TOTAL_PIXELS = CAMERA_WIDTH * CAMERA_HEIGHT
 # 重新计算面积阈值（基于实际分辨率）
 AREA_THRESH_80 = int(TOTAL_PIXELS * 0.20)  # 20% 阈值
 AREA_THRESH_13 = int(TOTAL_PIXELS * 0.02)  # 2% 阈值
+AREA_THRESH_MIN = int(TOTAL_PIXELS * 0.005)  # 最小阈值 0.5%，低于此值不闪烁
 
 print("摄像头分辨率: {}x{}, 总像素: {}".format(CAMERA_WIDTH, CAMERA_HEIGHT, TOTAL_PIXELS))
+print("面积阈值: MIN={} (0.5%), 13%={}, 80%={}".format(AREA_THRESH_MIN, AREA_THRESH_13, AREA_THRESH_80))
 
 # 时钟初始化
 clock = time.clock()
@@ -222,8 +225,10 @@ try:
                 suggested_blink_count = 5  # 极近: 闪5次
             elif max_area > AREA_THRESH_13:
                 suggested_blink_count = 2  # 中等 (13%~80%): 闪2次
+            elif max_area > AREA_THRESH_MIN:
+                suggested_blink_count = 1  # 较远 (AREA_THRESH_MIN~13%): 闪1次
             else:
-                suggested_blink_count = 1  # 较远 (<=13%): 闪1次
+                suggested_blink_count = 0  # 太远 (<=AREA_THRESH_MIN): 不闪烁
         else:
             suggested_blink_count = 0      # 未检测到: 灭
 
@@ -246,10 +251,13 @@ try:
         update_led_blink(target_blink_count)
 
         # --- 绘制辅助参考框 (自动计算 4:3 比例) ---
-        # 1. 13% 参考框 (蓝色)
+        # 1. 最小阈值参考框 (黄色) - 低于此值不闪烁
+        draw_ref_rect(img, AREA_THRESH_MIN, color=(255, 255, 0))
+        
+        # 2. 13% 参考框 (蓝色)
         draw_ref_rect(img, AREA_THRESH_13, color=(0, 0, 255))
 
-        # 2. 70% 参考框 (红色)
+        # 3. 80% 参考框 (红色)
         draw_ref_rect(img, AREA_THRESH_80, color=(255, 0, 0))
 
         # --- E. 显示与垃圾回收 ---
