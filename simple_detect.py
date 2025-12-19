@@ -28,10 +28,11 @@ GLOBAL_PERIOD_MS = 2000    # 大周期 2秒 (2000ms)
 SUB_PERIOD_MS = 200        # 小周期 200ms (100亮+100灭)
 SUB_ON_MS = 100            # 小周期中亮的时长
 
-# 面积阈值 (基于 QVGA 320x240 = 76800 像素)
+# 面积阈值将在摄像头初始化后根据实际分辨率自动计算
+# 初始值（会在初始化时被覆盖）
 TOTAL_PIXELS = 320 * 240
-AREA_THRESH_80 = int(TOTAL_PIXELS * 0.60)  # ~53760 (极近 70%)
-AREA_THRESH_13 = int(TOTAL_PIXELS * 0.13)  # ~9984  (中等起步)
+AREA_THRESH_80 = int(TOTAL_PIXELS * 0.20)
+AREA_THRESH_13 = int(TOTAL_PIXELS * 0.02)
 
 # 防抖参数
 CONFIRM_FRAMES = 2         # 连续确认帧数
@@ -56,6 +57,17 @@ sensor.set_framesize(sensor.QVGA)
 sensor.set_vflip(1)
 sensor.run(1)
 
+# 获取实际分辨率（自动适配）
+CAMERA_WIDTH = sensor.width()
+CAMERA_HEIGHT = sensor.height()
+TOTAL_PIXELS = CAMERA_WIDTH * CAMERA_HEIGHT
+
+# 重新计算面积阈值（基于实际分辨率）
+AREA_THRESH_80 = int(TOTAL_PIXELS * 0.20)  # 20% 阈值
+AREA_THRESH_13 = int(TOTAL_PIXELS * 0.02)  # 2% 阈值
+
+print("摄像头分辨率: {}x{}, 总像素: {}".format(CAMERA_WIDTH, CAMERA_HEIGHT, TOTAL_PIXELS))
+
 # 时钟初始化
 clock = time.clock()
 
@@ -63,56 +75,73 @@ clock = time.clock()
 task = kpu.load(MODEL_ADDR)
 _ = kpu.init_yolo2(task, CONF_THRESHOLD, NMS_THRESHOLD, 5, ANCHOR)
 
-# --- 3. 定时器中断 (LED 控制核心) ---
+# --- 3. LED 闪烁控制函数和定时器（递减逻辑） ---
 
-# 全局变量：主循环与中断通信
-g_target_blink_count = 0     # 主循环写入：期望的闪烁次数
-g_locked_blink_count = 0     # 中断内部使用：当前周期锁定的次数
-g_timer_start_ms = 0         # 中断内部使用：当前周期开始时间
+# 全局变量：使用绝对时间戳 (解决卡顿导致的时间拉长问题)
+g_period_start_time = 0    # 周期开始的系统时间戳 (ms)
+g_blink_duration = 0       # 预计闪烁持续时长 (ms)
+g_cooldown_duration = 0    # 总周期/冷却时长 (ms)
 
-def on_timer_blink(timer):
+def update_led_blink(blink_count):
     """
-    定时器回调：每 20ms 执行一次
-    功能：实现双周期锁定与精准 LED 控制
+    LED闪烁控制函数 (基于系统时钟)
     """
-    global g_target_blink_count, g_locked_blink_count, g_timer_start_ms, LED_ON, LED_OFF
+    global g_period_start_time, g_blink_duration, g_cooldown_duration
     
-    current_time = utime.ticks_ms()
+    current_time = time.ticks_ms()
     
-    # 首次运行初始化
-    if g_timer_start_ms == 0:
-        g_timer_start_ms = current_time
+    # 计算当前周期是否已经结束
+    # 如果从未开始过 (0) 或者 (当前时间 - 开始时间) 已经超过了 冷却时长
+    elapsed = time.ticks_diff(current_time, g_period_start_time)
+    
+    if g_period_start_time == 0 or elapsed >= g_cooldown_duration:
+        # 可以开始新周期
         
-    elapsed = utime.ticks_diff(current_time, g_timer_start_ms)
-    
-    # [逻辑 A] 周期锁定：检查大周期是否结束
-    if elapsed >= GLOBAL_PERIOD_MS:
-        g_timer_start_ms = current_time
-        elapsed = 0
-        # 仅在周期开始瞬间，采纳新的目标次数 (实现 Period Locking)
-        g_locked_blink_count = g_target_blink_count
+        # 计算参数
+        blink_duration = blink_count * SUB_PERIOD_MS
+        cooldown_duration = max(GLOBAL_PERIOD_MS, blink_duration)
         
-    # [逻辑 B] 执行闪烁
-    active_duration = g_locked_blink_count * SUB_PERIOD_MS
+        # 更新全局状态
+        g_period_start_time = current_time
+        g_blink_duration = blink_duration
+        g_cooldown_duration = cooldown_duration
+        
+        if blink_count > 0:
+            print("[LED] 新周期: 闪{}次 ({}ms), 冷却直到 +{}ms".format(
+                blink_count, blink_duration, cooldown_duration))
+
+def on_timer_time(timer, arg=None):
+    """
+    定时器回调：基于绝对时间控制 LED
+    """
+    global g_period_start_time, g_blink_duration, LED_ON, LED_OFF
     
-    if elapsed < active_duration:
-        # 处于活动期 (Active Phase)
-        sub_phase = elapsed % SUB_PERIOD_MS
-        if sub_phase < SUB_ON_MS:
+    if g_period_start_time == 0:
+        led_b.value(LED_OFF)
+        return
+
+    # 计算自周期开始以来经过的时间
+    now = time.ticks_ms()
+    elapsed = time.ticks_diff(now, g_period_start_time)
+    
+    # 1. 判断是否在闪烁期内
+    if elapsed < g_blink_duration:
+        # 在闪烁期内，计算相位
+        phase = elapsed % SUB_PERIOD_MS
+        
+        # 前 SUB_ON_MS 亮，后半段灭
+        if phase < SUB_ON_MS:
             led_b.value(LED_ON)
         else:
             led_b.value(LED_OFF)
     else:
-        # 处于休眠期 (Rest Phase)
+        # 2. 超过闪烁期 (处于冷却期或空闲期)，强制灭
         led_b.value(LED_OFF)
 
 # 启动定时器: TIMER0, CHANNEL0, 周期 20ms (50Hz)
-tim = Timer(Timer.TIMER0, Timer.CHANNEL0, mode=Timer.MODE_PERIODIC, period=20, callback=on_timer_blink)
+tim = Timer(Timer.TIMER0, Timer.CHANNEL0, mode=Timer.MODE_PERIODIC, period=20, unit=Timer.UNIT_MS, callback=on_timer_time, arg=None, start=True, priority=1, div=0)
 
 # --- 辅助函数 ---
-
-def _clamp(v, vmin, vmax):
-    return max(vmin, min(v, vmax))
 
 def draw_ref_rect(img, area, color):
     """
@@ -123,11 +152,13 @@ def draw_ref_rect(img, area, color):
     # H^2 = Area * 3/4
     h = int(math.sqrt(area * 3 / 4))
     w = int(h * 4 / 3)
-    
-    # 屏幕中心 (160, 120)
-    x = 160 - w // 2
-    y = 120 - h // 2
-    
+
+    # 获取实际分辨率并计算屏幕中心
+    center_x = sensor.width() // 2
+    center_y = sensor.height() // 2
+    x = center_x - w // 2
+    y = center_y - h // 2
+
     img.draw_rectangle(x, y, w, h, color=color)
 
 # --- 主循环 ---
@@ -139,7 +170,7 @@ confirm_counter = 0
 try:
     while(True):
         clock.tick()
-        
+
         # 图像采集与 AI 推理
         img = sensor.snapshot()
         code = kpu.run_yolo2(task, img)
@@ -163,9 +194,13 @@ try:
                         best_det = det
 
         # --- B. 决策逻辑 (状态机) ---
-        suggested_blink_count = 0 
-        
+        suggested_blink_count = 0
+
         if best_det:
+            # 计算并打印面积比例
+            area_ratio = (max_area / TOTAL_PIXELS) * 100
+            print("检测到目标，面积比例: {:.2f}%".format(area_ratio))
+
             if max_area >= AREA_THRESH_80:
                 suggested_blink_count = 5  # 极近: 闪5次
             elif max_area > AREA_THRESH_13:
@@ -174,23 +209,29 @@ try:
                 suggested_blink_count = 1  # 较远 (<=13%): 闪1次
         else:
             suggested_blink_count = 0      # 未检测到: 灭
-                
+
         # --- C. 防抖逻辑 (Hysteresis) ---
         if suggested_blink_count == last_suggested_count:
             confirm_counter += 1
         else:
             confirm_counter = 0
             last_suggested_count = suggested_blink_count
-            
+
+        # --- D. 更新LED闪烁 ---
+        # 修正逻辑：只有当检测结果稳定 (超过确认帧数) 时，才允许发起新的闪烁请求
+        target_blink_count = 0
         if confirm_counter >= CONFIRM_FRAMES:
-            # 只有连续 N 帧一致，才更新给定时器
-            g_target_blink_count = suggested_blink_count
-            confirm_counter = CONFIRM_FRAMES # 防止溢出
+            target_blink_count = suggested_blink_count
+
+        # 尝试更新 LED 状态
+        # update_led_blink 内部会检查当前是否空闲 (counter == 0)
+        # 如果当前正在闪烁 (counter > 0)，请求会被忽略，直到下一次空闲
+        update_led_blink(target_blink_count)
 
         # --- 绘制辅助参考框 (自动计算 4:3 比例) ---
         # 1. 13% 参考框 (蓝色)
         draw_ref_rect(img, AREA_THRESH_13, color=(0, 0, 255))
-        
+
         # 2. 70% 参考框 (红色)
         draw_ref_rect(img, AREA_THRESH_80, color=(255, 0, 0))
 
