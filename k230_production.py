@@ -162,7 +162,7 @@ class ObjectDetectionApp(AIBase):
 
 
 if __name__=="__main__":
-    
+
     # 显示模式，可以选择"hdmi"、"lcd3_5"(3.5寸mipi屏)和"lcd2_4"(2.4寸mipi屏)
 
     display="hdmi"
@@ -192,12 +192,15 @@ if __name__=="__main__":
 
     # 初始化PipeLine
     pl=PipeLine(rgb888p_size=rgb888p_size,display_size=display_size,display_mode=display_mode)
-    
-    if display =="lcd2_4":         
+
+    if display =="lcd2_4":
         pl.create(Sensor(width=1280, height=960))  # 创建PipeLine实例，画面4:3
-    
-    else:        
-        pl.create(Sensor(width=1920, height=1080))  # 创建PipeLine实例
+
+    else:
+        sensor = Sensor(width=1920, height=1080)
+        sensor.reset()
+        sensor.set_vflip(1)
+        pl.create(sensor)  # 创建PipeLine实例
 
     # 初始化自定义目标检测实例
     ob_det=ObjectDetectionApp(kmodel_path,labels=labels,model_input_size=[320,320],max_boxes_num=max_boxes_num,confidence_threshold=confidence_threshold,nms_threshold=nms_threshold,rgb888p_size=rgb888p_size,display_size=display_size,debug_mode=0)
