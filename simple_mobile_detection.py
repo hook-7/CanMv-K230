@@ -30,15 +30,15 @@ SUB_ON_MS = 100            # 小周期中亮的时长
 # 面积阈值比例配置
 AREA_RATIO_MIN = 0.005     # 0.5% - 最小阈值
 AREA_RATIO_13 = 0.02       # 2% - 中等阈值
-AREA_RATIO_80 = 0.20       # 20% - 极近阈值
+AREA_RATIO_80 = 0.50       # 20% - 极近阈值
 
 # 防抖参数
-CONFIRM_FRAMES = 1         # 连续确认帧数
+CONFIRM_FRAMES = 2        # 连续确认帧数
 
 # 方向检测参数
 DIRECTION_HISTORY_SIZE = 3  # 用于比较的历史帧数（计算平均值）
 MAX_MISSED_FRAMES = 3       # 允许连续丢失的最大帧数，超过此值才清空历史数据
-
+DIRECTION_TOLERANCE_PERCENT = 0.0
 # --- 2. 辅助函数 ---
 
 def calculate_area_thresholds(total_pixels):
@@ -106,7 +106,7 @@ def is_period_ended():
 def update_led_blink(blink_count):
     """LED闪烁控制函数"""
     global g_period_start_time, g_blink_duration, g_cooldown_duration
-    
+
     if blink_count == 0:
         if g_period_start_time != 0 and is_period_ended():
             g_period_start_time = 0
@@ -114,7 +114,7 @@ def update_led_blink(blink_count):
             g_cooldown_duration = 0
             print("[LED] 周期结束，重置状态")
         return
-    
+
     if is_period_ended():
         blink_duration = blink_count * SUB_PERIOD_MS
         cooldown_duration = max(GLOBAL_PERIOD_MS, blink_duration)
@@ -127,13 +127,13 @@ def update_led_blink(blink_count):
 def on_timer_time(timer, arg=None):
     """定时器回调：控制LED闪烁"""
     global g_period_start_time, g_blink_duration
-    
+
     if g_period_start_time == 0:
         led_b.value(LED_OFF)
         return
 
     elapsed = time.ticks_diff(time.ticks_ms(), g_period_start_time)
-    
+
     if elapsed < g_blink_duration:
         phase = elapsed % SUB_PERIOD_MS
         led_b.value(LED_ON if phase < SUB_ON_MS else LED_OFF)
@@ -141,8 +141,8 @@ def on_timer_time(timer, arg=None):
         led_b.value(LED_OFF)
 
 # 启动定时器
-tim = Timer(Timer.TIMER0, Timer.CHANNEL0, mode=Timer.MODE_PERIODIC, 
-            period=20, unit=Timer.UNIT_MS, callback=on_timer_time, 
+tim = Timer(Timer.TIMER0, Timer.CHANNEL0, mode=Timer.MODE_PERIODIC,
+            period=20, unit=Timer.UNIT_MS, callback=on_timer_time,
             arg=None, start=True, priority=1, div=0)
 
 def draw_ref_rect(img, area, color):
@@ -154,14 +154,18 @@ def draw_ref_rect(img, area, color):
     img.draw_rectangle(center_x - w // 2, center_y - h // 2, w, h, color=color)
 
 def is_moving_closer(current_area, area_history, history_size):
-    """判断目标是否在靠近"""
+    """判断目标是否在靠近（允许正负百分比误差）"""
+    # “靠近(持续变大)”定义：当前面积 > 历史平均面积 * (1 + 误差%)
+    # 例：误差5%时，需要 current_area > avg_historical*1.05 才判定为靠近
     if len(area_history) < history_size:
-        return True
+        # 历史不足时无法判断“持续变大”，按“不靠近”处理
+        return False
     avg_historical = sum(area_history[-history_size:]) / history_size
-    return current_area > avg_historical
+    tolerance_factor = DIRECTION_TOLERANCE_PERCENT / 100.0
+    return current_area > (avg_historical * (1 + tolerance_factor))
 
 def get_blink_count_by_area(area):
-    """根据面积返回闪烁次数"""
+    """根据面积返回闪烁次数（旧逻辑，已停用，保留仅作参考）"""
     if area >= AREA_THRESH_80:
         return 5
     elif area > AREA_THRESH_13:
@@ -198,7 +202,7 @@ try:
             for det in code:
                 if det.classid() == TARGET_CLASSID:
                     img.draw_rectangle(det.rect(), color=(0, 255, 0))
-                    img.draw_string(det.x(), det.y(), CLASSES[det.classid()], 
+                    img.draw_string(det.x(), det.y(), CLASSES[det.classid()],
                                    color=(255, 0, 0), scale=2)
                     area = det.w() * det.h()
                     if area > max_area:
@@ -212,13 +216,25 @@ try:
             area_ratio = (max_area / TOTAL_PIXELS) * 100
             print("检测到目标，面积比例: {:.2f}%".format(area_ratio))
 
-            suggested_blink_count = get_blink_count_by_area(max_area)
-            
-            if suggested_blink_count > 0:
-                if not is_moving_closer(max_area, area_history, DIRECTION_HISTORY_SIZE):
-                    suggested_blink_count = 0
-                    print("目标远离或静止，禁止闪烁")
-            
+            # 新规则：
+            # - area < MIN: 不闪
+            # - area >= 80%阈值: 闪10下（等价持续闪）
+            # - area < 80%阈值 且靠近: 闪3下
+            # - area < 80%阈值 且不靠近(静止/远离): 闪1下
+            if max_area >= AREA_THRESH_80:
+                suggested_blink_count = 10
+                print("达到极近阈值(>=80%)，持续闪(10下)")
+            elif max_area >= AREA_THRESH_MIN:
+                if is_moving_closer(max_area, area_history, DIRECTION_HISTORY_SIZE):
+                    suggested_blink_count = 3
+                    print("目标在靠近(持续变大)，闪3下")
+                else:
+                    suggested_blink_count = 1
+                    print("目标未靠近(静止/远离)，闪1下")
+            else:
+                suggested_blink_count = 0
+                print("目标过小(<MIN)，不闪")
+
             area_history.append(max_area)
             if len(area_history) > DIRECTION_HISTORY_SIZE:
                 area_history = area_history[-DIRECTION_HISTORY_SIZE:]
@@ -241,8 +257,8 @@ try:
             update_led_blink(suggested_blink_count)
 
         # 绘制参考框
-        # for area, color in REF_BOXES:
-        #     draw_ref_rect(img, area, color)
+        for area, color in REF_BOXES:
+            draw_ref_rect(img, area, color)
 
         lcd.display(img)
         gc.collect()
