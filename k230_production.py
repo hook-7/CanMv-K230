@@ -10,6 +10,7 @@ from libs.AIBase import AIBase
 from libs.AI2D import Ai2d
 import os
 import ujson
+import math
 from media.media import *
 from media.sensor import *
 from time import *
@@ -53,6 +54,38 @@ class ObjectDetectionApp(AIBase):
         self.ai2d=Ai2d(debug_mode)
         # 设置Ai2d的输入输出格式和类型
         self.ai2d.set_ai2d_dtype(nn.ai2d_format.NCHW_FMT,nn.ai2d_format.NCHW_FMT,np.uint8, np.uint8)
+
+        # 移动侦测/闪烁逻辑变量
+        self.area_history = []
+        self.smoothed_area = None
+        self.direction_history_size = 5
+        self.total_pixels = self.rgb888p_size[0] * self.rgb888p_size[1]
+        
+        # 面积阈值比例
+        self.area_ratio_min = 0.005
+        self.area_ratio_80 = 0.50
+        
+        # 面积阈值 (像素)
+        self.area_thresh_min = int(self.total_pixels * self.area_ratio_min)
+        self.area_thresh_80 = int(self.total_pixels * self.area_ratio_80)
+        
+        # 平滑参数
+        self.alpha_near = 0.20
+        self.alpha_far = 0.70
+        
+        # 靠近判定阈值
+        self.approach_eps_far_percent = 0.5
+        self.approach_eps_near_percent = 5.0
+
+        # 闪烁状态
+        self.blink_interval_ms = 100
+        self.last_blink_toggle_time = 0
+        self.is_blink_on = False
+
+        # 警告状态
+        self.warning_active = False
+        self.warning_start_time = 0
+        self.warning_duration_ms = 3000
 
     # 配置预处理操作，这里使用了resize，Ai2d支持crop/shift/pad/resize/affine，具体代码请打开/sdcard/libs/AI2D.py查看
     def config_preprocess(self,input_image_size=None):
@@ -101,21 +134,134 @@ class ObjectDetectionApp(AIBase):
             dets_out = dets_out[:self.max_boxes_num, :]
             return dets_out
 
+    def _clamp01(self, x):
+        if x < 0:
+            return 0.0
+        if x > 1:
+            return 1.0
+        return x
+
+    def get_adaptive_alpha(self, area):
+        if area <= self.area_thresh_min:
+            return self.alpha_far
+        if area >= self.area_thresh_80:
+            return self.alpha_near
+        t = (area - self.area_thresh_min) / (self.area_thresh_80 - self.area_thresh_min)
+        t = self._clamp01(t)
+        t = math.sqrt(t)
+        return self.alpha_far - (self.alpha_far - self.alpha_near) * t
+
+    def smooth_area_ewma(self, raw_area, prev_smoothed):
+        if prev_smoothed is None:
+            return raw_area
+        alpha = self.get_adaptive_alpha(raw_area)
+        return alpha * raw_area + (1 - alpha) * prev_smoothed
+
+    def get_adaptive_approach_eps(self, area):
+        if area <= self.area_thresh_min:
+            return self.approach_eps_far_percent / 100.0
+        if area >= self.area_thresh_80:
+            return self.approach_eps_near_percent / 100.0
+        t = (area - self.area_thresh_min) / (self.area_thresh_80 - self.area_thresh_min)
+        t = self._clamp01(t)
+        t = math.sqrt(t)
+        eps_percent = self.approach_eps_far_percent + (self.approach_eps_near_percent - self.approach_eps_far_percent) * t
+        return eps_percent / 100.0
+
+    def is_moving_closer(self, current_area, area_history, history_size):
+        if len(area_history) < history_size:
+            return False
+        avg_historical = sum(area_history[-history_size:]) / history_size
+        eps = self.get_adaptive_approach_eps(current_area)
+        return current_area > (avg_historical * (1.0 + eps))
+
     # 绘制结果
     def draw_result(self,pl,dets):
         with ScopedTiming("display_draw",self.debug_mode >0):
-            if dets:
+            try:
+                current_time = time.ticks_ms()
+            except:
+                current_time = int(time.time() * 1000)
+
+            if dets is not None and len(dets) > 0:
                 pl.osd_img.clear()
-                for det in dets:
+                
+                # 1. 寻找最大目标 (用于判定是否靠近)
+                max_area = 0
+                best_det_idx = -1
+                for i in range(len(dets)):
+                    w_det = dets[i][2] - dets[i][0]
+                    h_det = dets[i][3] - dets[i][1]
+                    area = w_det * h_det
+                    if area > max_area:
+                        max_area = area
+                        best_det_idx = i
+                
+                # 2. 更新状态与判断
+                is_approaching = False
+                if best_det_idx != -1:
+                    # 平滑面积
+                    self.smoothed_area = self.smooth_area_ewma(max_area, self.smoothed_area)
+                    area_for_decision = self.smoothed_area
+                    
+                    # 判断趋势
+                    if self.is_moving_closer(area_for_decision, self.area_history, self.direction_history_size):
+                        is_approaching = True
+                        # 触发警告
+                        self.warning_active = True
+                        self.warning_start_time = current_time
+                    
+                    # 更新历史
+                    self.area_history.append(area_for_decision)
+                    if len(self.area_history) > self.direction_history_size:
+                        self.area_history.pop(0)
+
+                # 3. 检查警告持续时间
+                if self.warning_active:
+                    if time.ticks_diff(current_time, self.warning_start_time) > self.warning_duration_ms:
+                        self.warning_active = False
+
+                # 4. 绘制框
+                for i in range(len(dets)):
+                    det = dets[i]
                     x1, y1, x2, y2 = map(lambda x: int(round(x, 0)), det[:4])
                     x= x1*self.display_size[0] // self.rgb888p_size[0]
                     y= y1*self.display_size[1] // self.rgb888p_size[1]
                     w = (x2 - x1) * self.display_size[0] // self.rgb888p_size[0]
                     h = (y2 - y1) * self.display_size[1] // self.rgb888p_size[1]
-                    pl.osd_img.draw_rectangle(x,y, w, h, color=self.get_color(int(det[5])),thickness=4)
-                    pl.osd_img.draw_string_advanced( x , y-50,32," " + self.labels[int(det[5])] + " " + str(round(det[4],2)) , color=self.get_color(int(det[5])))
+                    
+                    base_color = self.get_color(int(det[5]))
+                    # base_color is (A, R, G, B) based on self.color_four
+                    # Extract RGB
+                    c_a, c_r, c_g, c_b = base_color
+                    
+                    if self.warning_active and i == best_det_idx:
+                        # 警告效果：加粗线框（10倍粗），内透明外不透明过度
+                        max_thick = 80 
+                        for t in range(0, max_thick, 4):
+                            # Alpha 从内(0)到外(255)过度
+                            # 内框：t=0 -> alpha=0 (透明)
+                            # 外框：t=max_thick -> alpha=255 (不透明)
+                            alpha = int(255 * (t / max_thick))
+                            if alpha > 255: alpha = 255
+                            
+                            draw_color = (alpha, c_r, c_g, c_b)
+                            
+                            # 向外扩展绘制，使用 thickness=4 步进以在保证性能的同时提供极大厚度
+                            pl.osd_img.draw_rectangle(x - t, y - t, w + 2*t, h + 2*t, color=draw_color, thickness=4)
+                        
+                        # 绘制标签 (使用不透明颜色)
+                        pl.osd_img.draw_string_advanced( x , y-50, 32, "WARNING", color=(255, c_r, c_g, c_b))
+                        
+                    else:
+                        # 正常绘制
+                        pl.osd_img.draw_rectangle(x,y, w, h, color=base_color, thickness=4)
+                        pl.osd_img.draw_string_advanced( x , y-50,32," " + self.labels[int(det[5])] + " " + str(round(det[4],2)) , color=base_color)
             else:
                 pl.osd_img.clear()
+                if len(self.area_history) > 0:
+                    self.area_history = []
+                    self.smoothed_area = None
 
 
     # 多目标检测 非最大值抑制方法实现
@@ -183,8 +329,8 @@ if __name__=="__main__":
 
     # 模型路径
     kmodel_path="/sdcard/examples/kmodel/yolov8n_320.kmodel"
-    # labels = ["person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch", "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush"]
-    labels = ["人", "自行车", "汽车", "摩托车", "飞机", "公共汽车", "火车", "卡车", "船", "交通灯", "消防栓", "停车标志", "停车收费表", "长凳", "鸟", "猫", "狗", "马", "羊", "牛", "大象", "熊", "斑马", "长颈鹿", "背包", "雨伞", "手提包", "领带", "手提箱", "飞盘", "滑雪板", "滑雪板", "运动球", "风筝", "棒球棒", "棒球手套", "滑板", "冲浪板", "网球拍", "瓶子", "酒杯", "杯子", "叉子", "刀子", "勺子", "碗", "香蕉", "苹果", "三明治", "橙子", "西兰花", "胡萝卜", "热狗", "披萨", "甜甜圈", "蛋糕", "椅子", "沙发", "盆栽", "床", "餐桌", "马桶", "电视", "笔记本电脑", "鼠标", "遥控器", "键盘", "手机", "微波炉", "烤箱", "烤面包机", "水槽", "冰箱", "书", "钟表", "花瓶", "剪刀", "泰迪熊", "吹风机", "牙刷"]
+    labels = ["person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch", "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush"]
+    #labels = ["人", "自行车", "汽车", "摩托车", "飞机", "公共汽车", "火车", "卡车", "船", "交通灯", "消防栓", "停车标志", "停车收费表", "长凳", "鸟", "猫", "狗", "马", "羊", "牛", "大象", "熊", "斑马", "长颈鹿", "背包", "雨伞", "手提包", "领带", "手提箱", "飞盘", "滑雪板", "滑雪板", "运动球", "风筝", "棒球棒", "棒球手套", "滑板", "冲浪板", "网球拍", "瓶子", "酒杯", "杯子", "叉子", "刀子", "勺子", "碗", "香蕉", "苹果", "三明治", "橙子", "西兰花", "胡萝卜", "热狗", "披萨", "甜甜圈", "蛋糕", "椅子", "沙发", "盆栽", "床", "餐桌", "马桶", "电视", "笔记本电脑", "鼠标", "遥控器", "键盘", "手机", "微波炉", "烤箱", "烤面包机", "水槽", "冰箱", "书", "钟表", "花瓶", "剪刀", "泰迪熊", "吹风机", "牙刷"]
     # 其它参数设置
     confidence_threshold = 0.2
     nms_threshold = 0.2
@@ -215,7 +361,7 @@ if __name__=="__main__":
         img=pl.get_frame() # 获取当前帧数据
         res=ob_det.run(img) # 推理当前帧
         ob_det.draw_result(pl,res) # 绘制结果到PipeLine的osd图像
-        print(res)  # 打印当前结果
+        # print(res)  # 打印当前结果
         pl.show_image() # 显示当前的绘制结果
         gc.collect()
 
